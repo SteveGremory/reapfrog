@@ -32,9 +32,11 @@ struct Prefetch {
 
 impl Prefetch {
     fn new(f: File, len: u64, p: PathBuf) -> Self {
+        #[cfg(not(target_os = "macos"))]
         unsafe {
             libc::posix_fadvise(f.as_raw_fd(), 0, 0, libc::POSIX_FADV_SEQUENTIAL);
         }
+
         Prefetch{f, read_pos: 0, length: len, p, to_drop: 0, prefetch_pos: 0}
     }
 }
@@ -76,10 +78,12 @@ impl<'a, T> Read for &'a mut Reader<'a, T>
                 if drop {
                     fetch.to_drop += bytes as u64;
                     if fetch.to_drop >= DROPBEHIND_BLOCK {
+                    #[cfg(not(target_os = "macos"))]
                         unsafe {
                             let drop_offset = fetch.read_pos - fetch.to_drop;
                             libc::posix_fadvise(fetch.f.as_raw_fd(), drop_offset as i64, fetch.to_drop as i64, libc::POSIX_FADV_DONTNEED);
                         }
+
                         fetch.to_drop = 0;
                     }
                 }
@@ -147,8 +151,17 @@ impl<Src: Iterator<Item=PathBuf>> MultiFileReadahead<Src>  {
 
             prefetch_length = new_pos - old_pos;
 
+            #[cfg(not(target_os = "macos"))]
             unsafe {
                 libc::posix_fadvise(p.f.as_raw_fd(), old_pos as i64, prefetch_length as i64, libc::POSIX_FADV_WILLNEED);
+            }
+
+            #[cfg(target_os = "macos")]
+            unsafe {
+                libc::fcntl(p.f.as_raw_fd(), libc::F_RDADVISE, libc::radvisory { 
+                    ra_offset: old_pos as i64,
+                    ra_count: prefetch_length as i32
+                });
             }
 
             budget = budget.saturating_sub(prefetch_length);
@@ -186,6 +199,7 @@ impl<Src: Iterator<Item=PathBuf>> MultiFileReadahead<Src>  {
         // discard most recent file
         if let Some(Ok(p)) = self.open.pop_front() {
             if p.to_drop > 0 {
+                #[cfg(not(target_os = "macos"))]
                 unsafe {
                     libc::posix_fadvise(p.f.as_raw_fd(), 0, 0, libc::POSIX_FADV_DONTNEED);
                 }
